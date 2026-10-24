@@ -50,6 +50,7 @@
 #include "src/system/streaming/podcaststate.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/qobuzsync.h"
+#include "src/system/streaming/subsoniccache.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/streaming/tidalsync.h"
 #include "src/system/core/utils.h"
@@ -1228,7 +1229,8 @@ static bool playing_local_file(const device_state_t *state) {
 		return false;
 	}
 	const char *f = state->current_file;
-	return !qobuzcache_owns(f) && !tidalcache_owns(f) && !podcastcache_is_episode(f) && !dlna_owns_path(f) &&
+	return !qobuzcache_owns(f) && !tidalcache_owns(f) && !subsoniccache_owns(f) && !podcastcache_is_episode(f) &&
+	   !dlna_owns_path(f) &&
 		   !dlna_owns_playback();
 }
 
@@ -3970,7 +3972,8 @@ static void update_format_label(const device_state_t *state) {
 		// finished, for the reason just given.
 		struct stat st;
 		if (kbps <= 0 && !qobuzcache_owns(state->current_file) && !tidalcache_owns(state->current_file) &&
-			state->progress_total_secs > 0.5 && stat(state->current_file, &st) == 0 && st.st_size > 0) {
+			!subsoniccache_owns(state->current_file) && state->progress_total_secs > 0.5 &&
+			stat(state->current_file, &st) == 0 && st.st_size > 0) {
 			kbps = (int)((double)st.st_size * 8.0 / state->progress_total_secs / 1000.0 + 0.5);
 		}
 

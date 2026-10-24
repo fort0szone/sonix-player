@@ -25,6 +25,7 @@
 #include "src/system/remote/dlna.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/subsoniccache.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/tidalcache.h"
@@ -1034,6 +1035,7 @@ void power_shutdown(void) {
 	// power cycle: without this the hidden folders carry a gigabyte of files
 	// the user never put there and will not listen to again.
 	qobuzcache_clear_on_exit();
+	subsoniccache_clear_on_exit();
 	tidalcache_clear_on_exit();
 	podcastcache_clear_on_exit();
 	dlna_clear_on_exit();
