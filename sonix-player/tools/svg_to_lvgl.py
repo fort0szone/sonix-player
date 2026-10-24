@@ -430,6 +430,7 @@ COLOR_ICONS = [
     # The Streaming section's own grid.
     ("tidal.png", "menu_tidal", SECTION_ICON_SIZE),
     ("qobuz.png", "menu_qobuz", SECTION_ICON_SIZE),
+    ("subsonic.png", "menu_subsonic", SECTION_ICON_SIZE),
     ("radio.png", "menu_radio", SECTION_ICON_SIZE),
     ("podcast.png", "menu_podcast", SECTION_ICON_SIZE),
     ("audiobooks.png", "menu_audiobooks", MAIN_MENU_ICON_SIZE),
