@@ -583,9 +583,23 @@ static const volume_output_t VLIMIT_OUTPUTS[VLIMIT_OUTPUT_COUNT] = {VOLUME_OUTPU
 
 #define VLIMIT_STEPS (100 - VOLUME_LIMIT_MIN + 1)
 
-static bool vlimit_has_balanced(void) { return !sysinfo_model()->cs43131; }
+static bool vlimit_has_balanced(void) {
+	// sysinfo_model() answers NULL when the device name is not one it knows --
+	// a stock unit, or a build started on a host. Every other caller of it
+	// guards; this one did not, and the dereference took the whole page down
+	// before the settings page had even been built.
+	const sysinfo_model_t *model = sysinfo_model();
+	return !model || !model->cs43131;
+}
 
 static void vlimit_refresh(void) {
+	// Called from the builder, from the toggle, and from a theme refresh. The
+	// last of those can arrive before build_volume_limit_page() has made the
+	// widgets, and writing to a widget that is not there is a fault, not a
+	// no-op.
+	if (!vlimit_switch) {
+		return;
+	}
 	bool on = volume_limit_enabled();
 	if (on) {
 		lv_obj_add_state(vlimit_switch, LV_STATE_CHECKED);
