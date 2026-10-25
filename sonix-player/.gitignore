@@ -1,0 +1,30 @@
+# Build output
+build_host/
+build_target/
+*.o
+*.d
+sonix_player
+sonix_player_debug
+sonix_player_host
+sonix_launch
+sonix-launch
+
+# Toolchains and vendored build trees
+rockbox-toolchain/
+freetype-target/
+audio-target/
+
+# Local runtime bits (the simulator wants a resource tree beside it)
+usr/
+
+# Third-party API keys. Filled in per checkout, never committed: a key in a
+# public repository is a key that has to be replaced.
+streaming-keys.ini
+
+# Editor and OS litter
+.DS_Store
+*.swp
+*~
+
+# Python bytecode from the tools/
+__pycache__/
