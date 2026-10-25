@@ -100,6 +100,13 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **Tidal** - sign in with the code on screen or the QR code. Low, High, CD and Hi-Res quality. Search, albums, artists, playlists, favourites, new releases, most streamed and recommended. You can add and remove favourites and manage your playlists from the player.
 - **Qobuz** - sign in with your account. MP3 320, FLAC 16/44.1, 24/96 and 24/192. Search, albums, artists, playlists, favourites and new releases. You can add and remove favourites and manage your playlists from the player.
+- **Subsonic** - your own music, from a server you run. Navidrome, Airsonic, Gonic and Ampache all work.
+  > Sign in with the server's address, for example `https://music.example.com`. The player keeps each server you sign in to, so coming back to one is a tap and no password.
+  > **Second address** - give the same server two addresses, its local one at home and another away from it, and the player tries the first and falls back to the other. A track is always fetched from the address that answered, so it works on the home network and outside it without switching anything.
+  > **Streaming quality** - Original, or 320, 256, 192 and 128 kbps. Original keeps whatever the server holds; anything else asks the server to transcode, which arrives as MP3. Changing it clears what is already cached.
+  > **Stream or Keep** - Stream plays each track straight from the server and leaves nothing on the card. Keep stores what you play, up to 1 GB, so it plays again without downloading. Streaming is the default.
+  > **Library** - recently added, recently played, most played, alphabetical and random albums, artists, playlists, starred albums and favourite tracks. Search covers songs, albums and artists.
+  > **Offline** - with Keep, what you have played stays on the card and plays with no network at all. With Stream, a track is dropped as playback moves on, so anything not yet fetched needs the server.
 - **Radio** - thousands of stations by country, language or genre, plus search, favourites and recently played. MP3, AAC and FLAC stations.
   > **My stations** - write your own list in a `radio.txt` file in the root of the card, one station per line: `name, address`.
 - **Last.fm** - scrobbles what you listen to. Without Wi-Fi the plays are kept and sent the next time the player connects.

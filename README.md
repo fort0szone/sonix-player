@@ -124,7 +124,7 @@ The easiest way to get one is to copy `usr/resource/` out of
 next to `sonix_player_host`: the language files, the fonts, the images and the
 `system-info.json` of that player come with it.
 
-Without the language files the interface draws raw tags instead of words, and says so on the first line of the log. Without `streaming-keys.bin` everything works except Tidal, Qobuz, podcasts and Last.fm. The simulator also reads a plain `streaming-keys.ini` in the same folder.
+Without the language files the interface draws raw tags instead of words, and says so on the first line of the log. Without `streaming-keys.bin` everything works except Tidal, Qobuz, podcasts and Last.fm -- Subsonic needs no keys. The simulator also reads a plain `streaming-keys.ini` in the same folder.
 
 Fonts are looked for in `usr/resource/sonix/fonts` first and fall back to
 `assets/fonts` in the repo, so a tree without a resource folder still has text.
@@ -290,6 +290,9 @@ not in this repository: provide your own (for Last.fm, an API account from
 last.fm/api). They go into the image sealed, so that unpacking
 it does not hand them out as a text file.
 
+Subsonic is not in this list: it needs no key, so it works in a build with no
+keys at all. See "Subsonic" below.
+
 1. Copy `sonix-player/streaming-keys.ini.example` to
    `sonix-player/streaming-keys.ini` and fill it in.
 2. Seal it into both assets trees:
@@ -310,6 +313,39 @@ a `.bin` holds.
 
 This keeps the keys out of plain sight, not out of reach: the key is inside
 `sonix_player`, and whoever takes the binary apart can get them back.
+
+### Subsonic
+
+The Subsonic tile talks to any **OpenSubsonic** server you run yourself --
+Navidrome, Airsonic, Gonic and Ampache all answer it. Nothing is needed to
+build it: there is no key to provide and no section to fill in, which is why
+it is the one streaming service that works in a build with no
+`streaming-keys.bin` at all.
+
+Sign in from the tile with the server's address. A path is fine
+(`https://music.example.com/navidrome/`), and so is a plain `http://` address
+on a home network. The player lists what you sign in to, so a server you have
+used before is one tap and no password; what is stored is the address, the
+user name and the salt and digest the API signs with, never the password.
+Removing an entry is the bin beside it, and removing the one in use signs out
+of it.
+
+Two addresses may be given for one server, for a library reached one way at
+home and another way outside it. Requests go to the first and fall back to
+the second on a network failure or a server error -- not on a rejection, since
+a server that answers has answered -- and the track is then fetched from
+whichever one replied.
+
+Playing asks the server for a stream. **Original** takes what it holds;
+320, 256, 192 and 128 kbps ask it to transcode, which comes back as MP3.
+**Stream** leaves nothing on the card and **Keep** holds what has been played
+in a cache capped at 1 GB, so a track played once plays again without the
+network.
+
+Where it lives: `src/system/streaming/subsonic.c` is the API client and the
+saved-server list, `subsoniccache.c` the download and cache underneath it, and
+`src/gui/streaming/subsonicpage.c` the pages -- the servers, the library
+behind them, the lists, the search and the settings.
 
 ### What it needs installed
 
@@ -511,7 +547,7 @@ sonix-player/
 │   │   │   ├── settings/            18 files, one page each
 │   │   │   ├── shell/               28 files: theme, screen switcher, status bar, control centre,
 │   │   │   │                        keyboard, popups, toasts, settings rows, first start, icons.c
-│   │   │   ├── streaming/           Tidal, Qobuz, podcast and radio pages, OPML import
+│   │   │   ├── streaming/           Tidal, Qobuz, Subsonic, podcast and radio pages, OPML import
 │   │   │   └── wireless/            Wi-Fi, file transfer, AirPlay, DLNA, SonixLink
 │   │   │
 │   │   ├── system/                  
@@ -532,7 +568,7 @@ sonix-player/
 │   │   │   ├── net/                 HTTP, TLS, HLS, mDNS, transfer page
 │   │   │   ├── playback/            queue, play history, device state, audiobooks, sleep timers
 │   │   │   ├── remote/              AirPlay, DLNA, SonixLink
-│   │   │   └── streaming/           Tidal, Qobuz, radio and podcast clients, downloads, OPML, caches
+│   │   │   └── streaming/           Tidal, Qobuz, Subsonic, radio and podcast clients, downloads, OPML, caches
 │   │   │
 │   │   └── main.c                   entry point: display, input, and the startup order
 │   │
