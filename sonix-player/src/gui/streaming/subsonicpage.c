@@ -59,6 +59,10 @@ static lv_obj_t *settings_screen;
 // address of the variable (grid_entry_t.target), as for every other page.
 lv_obj_t *subsonic_screen;
 
+// The page behind it: one server's library. Declared here because the job
+// results above it switch to it.
+static lv_obj_t *library_screen;
+
 // ---------------------------------------------------------------------------
 // the worker
 // ---------------------------------------------------------------------------
@@ -66,6 +70,7 @@ lv_obj_t *subsonic_screen;
 typedef enum {
 	JOB_NONE = 0,
 	JOB_LOGIN,
+	JOB_ACTIVATE, // switch to a saved server
 	JOB_ALBUMS, // an album list: type in job.text
 	JOB_ARTISTS,
 	JOB_PLAYLISTS,
@@ -85,6 +90,7 @@ typedef struct {
 	char text[256];				 // search terms, or the album-list type
 	char text2[128];			 // password
 	char server[SUBSONIC_URL_MAX]; // sign-in address
+	char alt[SUBSONIC_URL_MAX];	   // its optional second address
 	char id[SUBSONIC_ID_MAX];
 	int index;	// which song of the list playback starts from
 	int offset; // first entry of this page: 0 = new list
@@ -182,6 +188,8 @@ static lv_obj_t *list_title;
 static lv_obj_t *list_empty;
 
 static void rebuild_home(void);
+static void rebuild_library(void);
+static void update_corner_buttons(void);
 static void row_clicked_cb(lv_event_t *e);
 static bool kind_pages(job_kind_t kind);
 
@@ -522,11 +530,21 @@ static void job_done_cb(void *user) {
 		return;
 	}
 
-	// Signing in is not a list: it changes what the home page offers.
-	if (result_kind == JOB_LOGIN) {
+	// Signing in, or switching to a server already saved, is not a list: it
+	// decides which library the rest of the page is about. Both land there.
+	if (result_kind == JOB_LOGIN || result_kind == JOB_ACTIVATE) {
 		rebuild_home();
-		toast_success("signed_in");
-		switch_screen(subsonic_screen);
+		rebuild_library();
+		update_corner_buttons();
+		if (result_kind == JOB_LOGIN) {
+			toast_success("signed_in");
+		}
+		// Landing on the library is a move, not a stack: the sign-in form is
+		// dropped from the history, so the first swipe back from a freshly
+		// added server reaches the servers page rather than the form that was
+		// just filled in. switch_screen_return_to() discards whatever was
+		// recorded above the servers page and loads the library over it.
+		switch_screen_return_to(library_screen);
 		return;
 	}
 
@@ -756,12 +774,6 @@ static bool subsonic_prepare_track(const char *path) {
 	return false;
 }
 
-static void play_started_async(void *user) {
-	(void)user;
-	switch_screen(list_screen);
-	switcher_set_player_return(list_screen);
-}
-
 // Scrobbles on its own thread: the call blocks on the server, so it must not
 // sit on the GUI thread or on the API worker (which must stay free for taps).
 static void *scrobble_main(void *arg) {
@@ -853,10 +865,15 @@ static void do_play(int index) {
 	}
 
 	waiting_for_track = false;
+	// The server's own length for the track that is starting. Bound to the
+	// path, so it does not matter whether this lands before or after the
+	// playback thread opens the file.
+	audio_set_known_duration(path, subsoniccache_duration(path));
 	device_state_play_list(path_ptr, queued_count, start);
 
 	scrobble_started(song->id);
-	gui_post(play_started_async, NULL);
+	player_refresh_now_playing();
+	switch_screen(player_screen);
 }
 
 // ---------------------------------------------------------------------------
@@ -941,6 +958,7 @@ static void queue_watch_cb(lv_timer_t *timer) {
 	if (waiting_for_track && current_path[0] && track_is_playable(current_path)) {
 		waiting_for_track = false;
 		fprintf(stderr, "subsonic: '%s' is ready, restarting the queue\n", current_path);
+		audio_set_known_duration(current_path, subsoniccache_duration(current_path));
 		device_state_play_queue_index(current);
 		player_refresh_now_playing();
 	}
@@ -1025,7 +1043,13 @@ static int execute(const job_t *job) {
 
 	switch (job->kind) {
 	case JOB_LOGIN:
-		if (!subsonic_login(job->server, job->text, job->text2)) {
+		if (!subsonic_login(job->server, job->alt, job->text, job->text2)) {
+			return -1;
+		}
+		return 0;
+
+	case JOB_ACTIVATE:
+		if (!subsonic_saved_activate(job->index)) {
 			return -1;
 		}
 		return 0;
@@ -1196,6 +1220,7 @@ static void maybe_load_more(void) {
 static lv_obj_t *user_field;
 static lv_obj_t *password_field;
 static lv_obj_t *server_field;
+static lv_obj_t *alt_field;
 static lv_obj_t *password_eye_icon;
 static keyboard_t *login_keyboard;
 
@@ -1217,9 +1242,9 @@ static void password_eye_cb(lv_event_t *e) {
 // the server field whatever was tapped -- which is exactly how this page
 // behaved before: the fields looked dead.
 static void focus_field(lv_obj_t *field) {
-	lv_obj_t *const all[3] = {server_field, user_field, password_field};
+	lv_obj_t *const all[4] = {server_field, alt_field, user_field, password_field};
 	keyboard_set_field(login_keyboard, field);
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 4; i++) {
 		if (!all[i]) {
 			continue;
 		}
@@ -1248,6 +1273,7 @@ static void login_accept_cb(lv_event_t *e) {
 	job_t job = {0};
 	job.kind = JOB_LOGIN;
 	snprintf(job.server, sizeof(job.server), "%s", server);
+	snprintf(job.alt, sizeof(job.alt), "%s", lv_textarea_get_text(alt_field));
 	snprintf(job.text, sizeof(job.text), "%s", user);
 	snprintf(job.text2, sizeof(job.text2), "%s", password);
 	run(&job, "subsonic_signing_in");
@@ -1281,9 +1307,13 @@ static void build_login_page(gui_config_t *cfg) {
 	settingsrow_title(login_screen, cfg, "subsonic_sign_in");
 	int top = settingsrow_content_top(cfg);
 
+	// Server, its optional second address, user, password -- in that order,
+	// because the two addresses belong together and reading them apart is how
+	// a person mistypes one into the other's field.
 	server_field = make_field(login_screen, cfg, "subsonic_server_address", top);
-	user_field = make_field(login_screen, cfg, "subsonic_username", top + 78);
-	password_field = make_field(login_screen, cfg, "password", top + 156);
+	alt_field = make_field(login_screen, cfg, "subsonic_alt_address", top + 78);
+	user_field = make_field(login_screen, cfg, "subsonic_username", top + 156);
+	password_field = make_field(login_screen, cfg, "password", top + 234);
 
 	// The password as on any modern system: dots from the first keystroke, and
 	// the eye to reveal the whole of it.
@@ -1292,7 +1322,7 @@ static void build_login_page(gui_config_t *cfg) {
 
 	lv_obj_t *eye = lv_btn_create(login_screen);
 	lv_obj_set_size(eye, 56, 56);
-	lv_obj_align(eye, LV_ALIGN_TOP_RIGHT, -cfg->padding - 4, top + 156 + 3);
+	lv_obj_align(eye, LV_ALIGN_TOP_RIGHT, -cfg->padding - 4, top + 234 + 3);
 	lv_obj_set_style_bg_opa(eye, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_shadow_width(eye, 0, 0);
 	lv_obj_set_style_border_width(eye, 0, 0);
@@ -1306,7 +1336,7 @@ static void build_login_page(gui_config_t *cfg) {
 	lv_obj_t *note = lv_label_create(login_screen);
 	lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
 	lv_obj_set_width(note, cfg->screen_width - 2 * cfg->padding);
-	lv_obj_align(note, LV_ALIGN_TOP_LEFT, cfg->padding, top + 234);
+	lv_obj_align(note, LV_ALIGN_TOP_LEFT, cfg->padding, top + 312);
 	lv_obj_add_style(note, &theme_style_text_dim, 0);
 	lv_obj_set_style_text_font(note, &font_ui_18, 0);
 	lv_label_set_text(note, tr("subsonic_login_note"));
@@ -1319,6 +1349,7 @@ static void build_login_page(gui_config_t *cfg) {
 static void open_login_cb(lv_event_t *e) {
 	(void)e;
 	lv_textarea_set_text(server_field, subsonic_server());
+	lv_textarea_set_text(alt_field, subsonic_alt_server());
 	lv_textarea_set_text(user_field, subsonic_display_name());
 	lv_textarea_set_text(password_field, "");
 	lv_textarea_set_password_mode(password_field, true);
@@ -1332,7 +1363,8 @@ static void open_login_cb(lv_event_t *e) {
 // the main page
 // ---------------------------------------------------------------------------
 
-static lv_obj_t *home_container;
+static lv_obj_t *home_container; // the servers page, on subsonic_screen
+static lv_obj_t *library_container; // the browse rows, one server's library
 static lv_obj_t *settings_btn;
 static lv_obj_t *search_btn;
 
@@ -1348,7 +1380,7 @@ static void update_corner_buttons(void) {
 }
 
 static lv_obj_t *corner_button(gui_config_t *cfg, int slot, const lv_image_dsc_t *glyph, lv_event_cb_t cb) {
-	lv_obj_t *button = lv_btn_create(subsonic_screen);
+	lv_obj_t *button = lv_btn_create(library_screen);
 	lv_obj_set_size(button, 56, 56);
 	lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
 	lv_obj_set_style_border_width(button, 0, 0);
@@ -1483,25 +1515,18 @@ static void quality_pick_cb(lv_event_t *e) {
 	if (switcher_back_drag_active()) {
 		return;
 	}
-	subsonic_set_bitrate((int)(intptr_t)lv_event_get_user_data(e));
+	int wanted = (int)(intptr_t)lv_event_get_user_data(e);
+	bool changed = wanted != subsonic_get_bitrate();
+	subsonic_set_bitrate(wanted);
 	quality_refresh();
-}
 
-static void do_logout(void *user) {
-	(void)user;
-	subsonic_logout();
-	// The tracks downloaded for that account are of no use to anyone.
-	subsoniccache_clear();
-	qobuzart_clear();
-	rebuild_home();
-	toast_success("signed_out");
-}
-
-static void logout_cb(lv_event_t *e) {
-	(void)e;
-	char message[160];
-	snprintf(message, sizeof(message), tr("sign_out_confirm_note"), subsonic_display_name());
-	confirm_show("subsonic_sign_out", message, "leave", do_logout, NULL);
+	// The container changes with the setting -- Original keeps the server's
+	// FLAC, anything else arrives as MP3 -- so every cached file is now under
+	// the wrong extension. Dropping them is cheaper than teaching the cache two
+	// names for one track.
+	if (changed) {
+		subsoniccache_clear();
+	}
 }
 
 static void open_settings_cb(lv_event_t *e) {
@@ -1564,8 +1589,6 @@ static void build_settings_page(gui_config_t *cfg) {
 
 		quality_pills[i] = btn;
 	}
-
-	settingsrow_action(container, "leave", logout_cb, NULL);
 
 	quality_refresh();
 	keep_refresh();
@@ -1744,19 +1767,20 @@ static void build_home_sections(void) {
 										"subsonic_most_played", "subsonic_alphabetical", "subsonic_random"};
 
 	for (int i = 0; i < 5; i++) {
-		lv_obj_t *row = settingsrow_add(home_container, NAMES[i], NULL, album_section_cb, (void *)TYPES[i]);
+		lv_obj_t *row = settingsrow_add(library_container, NAMES[i], NULL, album_section_cb, (void *)TYPES[i]);
 		lv_obj_set_style_margin_top(row, 8, 0);
 	}
 
-	lv_obj_t *gap = lv_obj_create(home_container);
+	lv_obj_t *gap = lv_obj_create(library_container);
 	lv_obj_set_size(gap, lv_pct(100), 16);
 	lv_obj_set_style_bg_opa(gap, 0, 0);
 	lv_obj_set_style_border_width(gap, 0, 0);
 
-	settingsrow_add(home_container, "artists", NULL, section_cb, (void *)(intptr_t)JOB_ARTISTS);
-	settingsrow_add(home_container, "playlists", NULL, section_cb, (void *)(intptr_t)JOB_PLAYLISTS);
-	settingsrow_add(home_container, "subsonic_starred_albums", NULL, section_cb, (void *)(intptr_t)JOB_STARRED_ALBUMS);
-	settingsrow_add(home_container, "favourites", NULL, section_cb, (void *)(intptr_t)JOB_STARRED_SONGS);
+	settingsrow_add(library_container, "artists", NULL, section_cb, (void *)(intptr_t)JOB_ARTISTS);
+	settingsrow_add(library_container, "playlists", NULL, section_cb, (void *)(intptr_t)JOB_PLAYLISTS);
+	settingsrow_add(library_container, "subsonic_starred_albums", NULL, section_cb,
+					(void *)(intptr_t)JOB_STARRED_ALBUMS);
+	settingsrow_add(library_container, "favourites", NULL, section_cb, (void *)(intptr_t)JOB_STARRED_SONGS);
 }
 
 // Whether the network is actually up. There is nothing to show without it:
@@ -1777,6 +1801,183 @@ static bool wifi_is_connected(void) {
 static void open_wifi_settings_cb(lv_event_t *e) {
 	(void)e;
 	switch_screen(wifisettings_screen);
+}
+
+// ---------------------------------------------------------------------------
+// the servers page
+//
+// The first thing the tile shows: a way to add a server, and the servers
+// already added. Tapping one opens its library; the bin beside it forgets it.
+//
+// This is the page that makes a second server usable. Before it, one server
+// was all the player could hold, and reaching another meant typing its address
+// again -- which is not a thing anybody does twice.
+// ---------------------------------------------------------------------------
+
+// Which saved entry a tap or a bin press refers to. Kept per row rather than
+// looked up by address, because the list is rebuilt as soon as it changes.
+static void saved_row_cb(lv_event_t *e);
+static void saved_delete_cb(lv_event_t *e);
+
+// The name a saved server is listed under: its address, without the scheme.
+// "http://192.168.1.10:4533" reads as noise; "192.168.1.10:4533" reads as an
+// address, and two servers on one host differ by port anyway.
+static void server_label(const char *url, char *out, size_t size) {
+	const char *start = strstr(url, "://");
+	start = start ? start + 3 : url;
+	snprintf(out, size, "%s", start);
+	size_t len = strlen(out);
+	while (len > 0 && out[len - 1] == '/') {
+		out[--len] = '\0';
+	}
+}
+
+static lv_obj_t *saved_row(lv_obj_t *parent, const subsonic_saved_t *entry, int index) {
+	lv_obj_t *row = lv_btn_create(parent);
+	lv_obj_set_size(row, lv_pct(100), 96);
+	lv_obj_add_style(row, &theme_style_card, 0);
+	lv_obj_add_style(row, &theme_style_card_pressed, LV_STATE_PRESSED);
+	lv_obj_set_style_radius(row, 12, 0);
+	lv_obj_set_style_border_width(row, 0, 0);
+	lv_obj_set_style_shadow_width(row, 0, 0);
+	lv_obj_set_style_pad_hor(row, 16, 0);
+	lv_obj_set_style_pad_ver(row, 0, 0);
+	lv_obj_set_style_pad_column(row, 8, 0);
+	lv_obj_set_scrollable(row, false);
+	lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_event_bubble(row, true);
+	lv_obj_add_event_cb(row, saved_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)index);
+
+	lv_obj_t *texts = lv_obj_create(row);
+	lv_obj_set_flex_grow(texts, 1);
+	lv_obj_set_height(texts, LV_SIZE_CONTENT);
+	lv_obj_set_style_bg_opa(texts, 0, 0);
+	lv_obj_set_style_border_width(texts, 0, 0);
+	lv_obj_set_style_pad_all(texts, 0, 0);
+	lv_obj_set_style_pad_row(texts, 6, 0);
+	lv_obj_set_scrollable(texts, false);
+	lv_obj_set_event_bubble(texts, true);
+	lv_obj_set_flex_flow(texts, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(texts, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+	char label[SUBSONIC_URL_MAX];
+	server_label(entry->server, label, sizeof(label));
+
+	lv_obj_t *name = lv_label_create(texts);
+	lv_label_set_text(name, label);
+	lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(name, lv_pct(100));
+	lv_obj_set_height(name, lv_font_get_line_height(&font_ui_22));
+	lv_obj_add_style(name, &theme_style_text, 0);
+	lv_obj_set_style_text_font(name, &font_ui_22, 0);
+
+	// The account, and whether there is a second address to fall back to. Both
+	// are things that distinguish one entry from another at a glance.
+	char detail[192];
+	if (entry->alt_server[0]) {
+		char alt_label[SUBSONIC_URL_MAX];
+		server_label(entry->alt_server, alt_label, sizeof(alt_label));
+		snprintf(detail, sizeof(detail), "%s \xC2\xB7 %s", entry->user, alt_label);
+	} else {
+		snprintf(detail, sizeof(detail), "%s", entry->user);
+	}
+
+	lv_obj_t *sub = lv_label_create(texts);
+	lv_label_set_text(sub, detail);
+	lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(sub, lv_pct(100));
+	lv_obj_set_height(sub, lv_font_get_line_height(&font_ui_18));
+	lv_obj_add_style(sub, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(sub, &font_ui_18, 0);
+
+	// The bin. A separate button so a tap on it is not a tap on the row: both
+	// are inside a button, and LVGL sends the click to the innermost one.
+	lv_obj_t *del = lv_btn_create(row);
+	lv_obj_set_size(del, 44, 44);
+	lv_obj_set_style_bg_opa(del, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(del, 0, 0);
+	lv_obj_set_style_shadow_width(del, 0, 0);
+	lv_obj_set_style_pad_all(del, 0, 0);
+	lv_obj_add_event_cb(del, saved_delete_cb, LV_EVENT_CLICKED, (void *)(intptr_t)index);
+
+	lv_obj_t *bin = lv_image_create(del);
+	lv_image_set_src(bin, &icon_trash);
+	lv_obj_add_style(bin, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor_opa(bin, LV_OPA_COVER, 0);
+	lv_obj_center(bin);
+
+	return row;
+}
+
+// The library the active server offers, on its own page.
+static void rebuild_library(void) {
+	lv_obj_clean(library_container);
+	build_home_sections();
+}
+
+// Which saved entry a tap refers to, held for the confirm dialog.
+static int pending_delete_index = -1;
+
+static void do_delete_saved(void *user) {
+	(void)user;
+	if (pending_delete_index < 0) {
+		return;
+	}
+
+	// Removing the server that is signed in signs out of it: leaving the live
+	// session pointing at an entry that no longer exists would show a library
+	// whose server the list does not admit to.
+	subsonic_saved_t entry;
+	bool was_active = subsonic_saved_get(pending_delete_index, &entry) && entry.server[0] &&
+					  strcmp(entry.server, subsonic_server()) == 0;
+
+	subsonic_saved_forget(pending_delete_index);
+	pending_delete_index = -1;
+
+	if (was_active) {
+		subsonic_logout();
+	}
+
+	rebuild_home();
+	toast_success("subsonic_server_removed");
+}
+
+static void saved_delete_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	pending_delete_index = (int)(intptr_t)lv_event_get_user_data(e);
+
+	subsonic_saved_t entry;
+	char label[SUBSONIC_URL_MAX] = "";
+	if (subsonic_saved_get(pending_delete_index, &entry)) {
+		server_label(entry.server, label, sizeof(label));
+	}
+
+	char message[220];
+	snprintf(message, sizeof(message), tr("subsonic_remove_server_note"), label);
+	confirm_show("subsonic_remove_server", message, "delete", do_delete_saved, NULL);
+}
+
+// Signing in to a saved server is one tap, and normally no password: the salt
+// and digest are stored with it. A server that refuses them -- the password
+// changed there -- falls back to the sign-in page with the address filled in.
+static void saved_row_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	int index = (int)(intptr_t)lv_event_get_user_data(e);
+
+	job_t job = {0};
+	job.kind = JOB_ACTIVATE;
+	job.index = index;
+
+	subsonic_saved_t entry;
+	if (subsonic_saved_get(index, &entry)) {
+		server_label(entry.server, job.text, sizeof(job.text));
+	}
+	run(&job, "loading");
 }
 
 static void rebuild_home(void) {
@@ -1801,25 +2002,34 @@ static void rebuild_home(void) {
 		return;
 	}
 
-	if (!subsonic_logged_in()) {
-		update_corner_buttons();
-		settingsrow_add(home_container, "subsonic_sign_in", NULL, open_login_cb, NULL);
+	update_corner_buttons();
+
+	// Adding one, always at the top: the row a first-time user needs is the
+	// first thing on the page.
+	settingsrow_add(home_container, "subsonic_sign_in", NULL, open_login_cb, NULL);
+
+	int count = subsonic_saved_count();
+	if (count == 0) {
+		lv_obj_t *note = lv_label_create(home_container);
+		lv_label_set_long_mode(note, LV_LABEL_LONG_WRAP);
+		lv_obj_set_width(note, lv_pct(100));
+		lv_obj_add_style(note, &theme_style_text_dim, 0);
+		lv_obj_set_style_text_font(note, &font_ui_20, 0);
+		lv_obj_set_style_pad_top(note, 18, 0);
+		lv_obj_set_style_pad_hor(note, 4, 0);
+		lv_label_set_text(note, tr("subsonic_no_servers_yet"));
 		return;
 	}
 
-	// The server in use, at the top: with more than one music server in a
-	// house, "which one am I looking at" is a real question.
-	lv_obj_t *where = lv_label_create(home_container);
-	lv_label_set_long_mode(where, LV_LABEL_LONG_DOT);
-	lv_obj_set_width(where, lv_pct(100));
-	lv_obj_add_style(where, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(where, &font_ui_18, 0);
-	lv_obj_set_style_pad_left(where, 4, 0);
-	lv_obj_set_style_pad_bottom(where, 6, 0);
-	lv_label_set_text(where, subsonic_server());
-
-	build_home_sections();
-	update_corner_buttons();
+	// Then the ones already there, each opening its own library.
+	for (int i = 0; i < count; i++) {
+		subsonic_saved_t entry;
+		if (!subsonic_saved_get(i, &entry)) {
+			continue;
+		}
+		lv_obj_t *row = saved_row(home_container, &entry, i);
+		lv_obj_set_style_margin_top(row, 8, 0);
+	}
 }
 
 bool subsonicpage_open_album(const char *album_id, const char *title) {
@@ -1839,12 +2049,20 @@ bool subsonicpage_owns(const char *path) { return subsoniccache_owns(path); }
 // ---------------------------------------------------------------------------
 
 static void home_loaded_cb(lv_event_t *e) {
-	(void)e;
 	// The card may have been inserted or removed since the page was built, and
 	// without a card there is nowhere to download to.
 	subsoniccache_set_root(storage_sd_root());
 	qobuzart_set_root(storage_sd_root());
-	rebuild_home();
+
+	// Which page loaded decides what to rebuild: the servers list, or the
+	// library behind it. Rebuilding both every time would throw away the
+	// library's scroll position for nothing.
+	if (e && lv_event_get_target(e) == library_screen) {
+		rebuild_library();
+		update_corner_buttons();
+	} else {
+		rebuild_home();
+	}
 }
 
 static void list_loaded_cb(lv_event_t *e) {
@@ -1884,12 +2102,16 @@ static void build_list_page(gui_config_t *cfg) {
 void subsonicpage_init(gui_config_t *cfg) {
 	subsonic_init();
 
+	// The tile opens on the servers page: what to sign in to, and what is
+	// already saved. The library is the page behind it, one tap further.
 	subsonic_screen = lv_obj_create(NULL);
 	home_container = settingsrow_page(subsonic_screen, cfg, "subsonic");
 
-	// Two buttons top right, like the Music gear: settings and search. The title
-	// must be told the corner is taken, otherwise its text runs under them.
-	settingsrow_title_corner_slots(settingsrow_page_title(subsonic_screen), cfg, 2);
+	// The library, with the corner buttons on it: settings and search belong to
+	// a server's library, not to the list of servers.
+	library_screen = lv_obj_create(NULL);
+	library_container = settingsrow_page(library_screen, cfg, "subsonic");
+	settingsrow_title_corner_slots(settingsrow_page_title(library_screen), cfg, 2);
 	settings_btn = corner_button(cfg, 0, &icon_music_settings, open_settings_cb);
 	search_btn = corner_button(cfg, 1, &icon_search, open_search_cb);
 
@@ -1922,4 +2144,9 @@ void subsonicpage_init(gui_config_t *cfg) {
 	switcher_attach_back_gesture(subsonic_screen);
 	player_sheet_attach_drag(subsonic_screen, true);
 	player_sheet_attach_drag(home_container, true);
+
+	lv_obj_add_event_cb(library_screen, home_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+	switcher_attach_back_gesture(library_screen);
+	player_sheet_attach_drag(library_screen, true);
+	player_sheet_attach_drag(library_container, true);
 }
