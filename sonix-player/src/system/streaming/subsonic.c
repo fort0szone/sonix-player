@@ -48,10 +48,16 @@
 #define SUBSONIC_PAGE_MAX 500
 
 static char server[SUBSONIC_URL_MAX];
+static char alt_server[SUBSONIC_URL_MAX];
 static char user[SUBSONIC_NAME_MAX];
 static char salt[16];
 static char token[MD5_HEX_LEN];
 static int bitrate; // 0 = the file as it is on the server
+
+// The address that actually answered last, so that stream and cover requests
+// go where the API calls are going. With one address it is simply `server`;
+// with two it is whichever of them is reachable from here.
+static char active_base[SUBSONIC_URL_MAX];
 
 // Per-thread like http_last_error(), and for the same reason: more than one
 // worker can have a request in flight, and they must not overwrite each
@@ -105,6 +111,8 @@ static void normalise_server(const char *in, char *out, size_t size) {
 
 void subsonic_init(void) {
 	normalise_server(config_get("subsonic", "server", ""), server, sizeof(server));
+	normalise_server(config_get("subsonic", "alt_server", ""), alt_server, sizeof(alt_server));
+	snprintf(active_base, sizeof(active_base), "%s", server);
 	snprintf(user, sizeof(user), "%s", config_get("subsonic", "user", ""));
 	snprintf(salt, sizeof(salt), "%s", config_get("subsonic", "salt", ""));
 	snprintf(token, sizeof(token), "%s", config_get("subsonic", "token", ""));
@@ -114,8 +122,8 @@ void subsonic_init(void) {
 		bitrate = 0;
 	}
 
-	printf("subsonic: %s, %s\n", subsonic_configured() ? server : "no server",
-		   subsonic_logged_in() ? "signed in" : "no session");
+	printf("subsonic: %s, %s%s\n", subsonic_configured() ? server : "no server",
+		   subsonic_logged_in() ? "signed in" : "no session", alt_server[0] ? " (with a second address)" : "");
 }
 
 bool subsonic_configured(void) { return server[0] && user[0]; }
@@ -124,6 +132,8 @@ bool subsonic_logged_in(void) { return subsonic_configured() && salt[0] && token
 
 const char *subsonic_display_name(void) { return user; }
 const char *subsonic_server(void) { return server; }
+const char *subsonic_alt_server(void) { return alt_server; }
+const char *subsonic_active_server(void) { return active_base[0] ? active_base : server; }
 
 int subsonic_get_bitrate(void) { return bitrate; }
 
@@ -138,15 +148,163 @@ void subsonic_set_bitrate(int kbps) {
 
 void subsonic_logout(void) {
 	server[0] = '\0';
+	alt_server[0] = '\0';
+	active_base[0] = '\0';
 	user[0] = '\0';
 	salt[0] = '\0';
 	token[0] = '\0';
 	config_set("subsonic", "server", "");
+	config_set("subsonic", "alt_server", "");
 	config_set("subsonic", "user", "");
 	config_set("subsonic", "salt", "");
 	config_set("subsonic", "token", "");
 	config_save();
 	printf("subsonic: signed out\n");
+}
+
+// ---------------------------------------------------------------------------
+// saved servers
+//
+// One entry per server the player has been signed in to, so that a second
+// server does not mean retyping the first one's details. Stored as numbered
+// keys in the configuration:
+//
+//     [subsonic]
+//     srv0 = http://192.168.1.10:4533|https://music.example.com|alice|<salt>|<digest>
+//
+// A single line per server, pipe-separated, because the configuration holds
+// flat keys and a list of five fields is still readable in a file a person may
+// edit over ADB. The password is not in there: only the salt and the digest it
+// produced, exactly as the live session keeps them.
+//
+// The order is the order they were added in, and it is what the sign-in page
+// lists. Removing one closes the gap, so that a saved list never has holes.
+// ---------------------------------------------------------------------------
+
+#define SAVED_MAX 8
+#define SAVED_FIELD_MAX (SUBSONIC_URL_MAX + SUBSONIC_URL_MAX + SUBSONIC_NAME_MAX + 16 + MD5_HEX_LEN + 8)
+
+static int saved_count(void) {
+	int n = 0;
+	for (int i = 0; i < SAVED_MAX; i++) {
+		char key[16];
+		snprintf(key, sizeof(key), "srv%d", i);
+		const char *value = config_get("subsonic", key, "");
+		if (value && *value) {
+			n++;
+		}
+	}
+	return n;
+}
+
+// Splits a stored line into its five fields. Missing trailing fields are left
+// empty rather than refused: a line written by an older build has no digest.
+static void parse_saved(const char *line, subsonic_saved_t *out) {
+	memset(out, 0, sizeof(*out));
+	if (!line || !*line) {
+		return;
+	}
+
+	char buf[SAVED_FIELD_MAX];
+	snprintf(buf, sizeof(buf), "%s", line);
+
+	char *fields[5] = {buf, NULL, NULL, NULL, NULL};
+	int n = 1;
+	for (char *p = buf; *p && n < 5; p++) {
+		if (*p == '|') {
+			*p = '\0';
+			fields[n++] = p + 1;
+		}
+	}
+
+	snprintf(out->server, sizeof(out->server), "%s", fields[0]);
+	if (n > 1) {
+		snprintf(out->alt_server, sizeof(out->alt_server), "%s", fields[1]);
+	}
+	if (n > 2) {
+		snprintf(out->user, sizeof(out->user), "%s", fields[2]);
+	}
+	if (n > 3) {
+		snprintf(out->salt, sizeof(out->salt), "%s", fields[3]);
+	}
+	if (n > 4) {
+		snprintf(out->token, sizeof(out->token), "%s", fields[4]);
+	}
+	out->signed_in = out->server[0] && out->salt[0] && out->token[0];
+}
+
+static void write_saved(int index, const subsonic_saved_t *s) {
+	char key[16];
+	snprintf(key, sizeof(key), "srv%d", index);
+
+	char line[SAVED_FIELD_MAX];
+	snprintf(line, sizeof(line), "%s|%s|%s|%s|%s", s->server, s->alt_server, s->user, s->salt, s->token);
+	config_set("subsonic", key, line);
+}
+
+int subsonic_saved_count(void) { return saved_count(); }
+
+bool subsonic_saved_get(int index, subsonic_saved_t *out) {
+	if (!out || index < 0 || index >= SAVED_MAX) {
+		return false;
+	}
+	char key[16];
+	snprintf(key, sizeof(key), "srv%d", index);
+	const char *value = config_get("subsonic", key, "");
+	if (!value || !*value) {
+		return false;
+	}
+	parse_saved(value, out);
+	return out->server[0] != '\0';
+}
+
+void subsonic_saved_store(const subsonic_saved_t *entry) {
+	if (!entry || !entry->server[0]) {
+		return;
+	}
+
+	// The identity is the primary address, so signing in again after a password
+	// change updates the entry rather than filling the list with duplicates.
+	int slot = -1;
+	for (int i = 0; i < SAVED_MAX && slot < 0; i++) {
+		subsonic_saved_t existing;
+		if (subsonic_saved_get(i, &existing) && strcmp(existing.server, entry->server) == 0) {
+			slot = i;
+		}
+	}
+	if (slot < 0) {
+		slot = saved_count();
+	}
+	if (slot >= SAVED_MAX) {
+		return; // full: the session still works, it just is not remembered
+	}
+
+	write_saved(slot, entry);
+	config_save();
+}
+
+void subsonic_saved_forget(int index) {
+	int count = saved_count();
+	if (index < 0 || index >= count) {
+		return;
+	}
+
+	// Shift the rest down so the list never has a hole: an empty srv2 between
+	// srv1 and srv3 would read as a server that vanished.
+	for (int i = index; i < count - 1; i++) {
+		subsonic_saved_t next;
+		char key[16];
+		if (subsonic_saved_get(i + 1, &next)) {
+			write_saved(i, &next);
+		} else {
+			snprintf(key, sizeof(key), "srv%d", i);
+			config_set("subsonic", key, "");
+		}
+	}
+	char key[16];
+	snprintf(key, sizeof(key), "srv%d", count - 1);
+	config_set("subsonic", key, "");
+	config_save();
 }
 
 // Eight hex characters out of /dev/urandom. Not because the protocol needs a
@@ -270,32 +428,78 @@ static bool api_call(const char *method, const char *params, char **body, json_d
 		return false;
 	}
 
-	char url[SUBSONIC_URL_MAX * 2];
-	urlbuf_t ub;
-	ub_init(&ub, url, sizeof(url));
-	ub_add(&ub, "%s/rest/%s.view?", server, method);
-	if (params && *params) {
-		ub_add(&ub, "%s", params);
-	}
-	ub_auth(&ub);
-	if (!ub.ok) {
-		set_error("%s", tr("subsonic_bad_address"));
-		return false;
-	}
+	// Two addresses, one after the other. The point of a second one is the
+	// case that matters to anybody with a music server: the same library
+	// reached by its LAN address at home and by something else -- a tunnel, a
+	// DNS name, a public port -- away from it. Only one is reachable at a
+	// time, and which one is not known until something is asked of it.
+	//
+	// So the first is tried, and on a failure that smells of the network
+	// rather than of the request, the second. What counts as such a failure:
+	// the connection never opened, or the reply was a gateway error. A 401 or
+	// a 404 means the server answered and the address is fine, so trying the
+	// other one would only be slower.
+	const char *candidates[2] = {server, alt_server[0] ? alt_server : NULL};
 
-	int status = 0;
-	size_t len = 0;
-	if (!http_get_ex(url, NULL, true, body, &len, SUBSONIC_BODY_LIMIT, SUBSONIC_TIMEOUT_SECS, &status)) {
-		const char *why = http_last_error();
-		set_error("%s", why && why[0] ? why : tr("subsonic_no_reply"));
-		return false;
-	}
+	// The status of the request that got this far, for the error message the
+	// wrapper check may still need below.
+	int answered_status = 0;
 
-	if (!json_parse(*body, doc)) {
-		free(*body);
-		*body = NULL;
-		set_error("%s", tr("subsonic_unreadable_reply"));
-		return false;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if (!candidates[attempt]) {
+			break;
+		}
+
+		char url[SUBSONIC_URL_MAX * 2];
+		urlbuf_t ub;
+		ub_init(&ub, url, sizeof(url));
+		ub_add(&ub, "%s/rest/%s.view?", candidates[attempt], method);
+		if (params && *params) {
+			ub_add(&ub, "%s", params);
+		}
+		ub_auth(&ub);
+		if (!ub.ok) {
+			set_error("%s", tr("subsonic_bad_address"));
+			return false;
+		}
+
+		int status = 0;
+		size_t len = 0;
+		if (!http_get_ex(url, NULL, true, body, &len, SUBSONIC_BODY_LIMIT, SUBSONIC_TIMEOUT_SECS, &status)) {
+			const char *why = http_last_error();
+			set_error("%s", why && why[0] ? why : tr("subsonic_no_reply"));
+
+			// A server that answered is a server that is there, whatever it
+			// said: do not move on to the other address.
+			bool reachable = status > 0 && status < 500;
+			if (reachable || !candidates[attempt + 1]) {
+				return false;
+			}
+			printf("subsonic: %s did not answer, trying the other address\n", candidates[attempt]);
+			continue;
+		}
+
+		// A 5xx from a proxy in front of a server that is down looks exactly
+		// like a 5xx from the server; try the other address before giving up.
+		if (status >= 500 && candidates[attempt + 1]) {
+			free(*body);
+			*body = NULL;
+			printf("subsonic: %s answered %d, trying the other address\n", candidates[attempt], status);
+			continue;
+		}
+
+		if (!json_parse(*body, doc)) {
+			free(*body);
+			*body = NULL;
+			set_error("%s", tr("subsonic_unreadable_reply"));
+			return false;
+		}
+
+		// Remembered for the URL builders: stream and cover requests must go to
+		// the address that is actually answering, not to the first one.
+		snprintf(active_base, sizeof(active_base), "%s", candidates[attempt]);
+		answered_status = status;
+		break;
 	}
 
 	// The wrapper is the same for every endpoint, including the failures: a
@@ -322,7 +526,7 @@ static bool api_call(const char *method, const char *params, char **body, json_d
 		if (message[0]) {
 			set_error("%s", message);
 		} else {
-			set_error(tr("subsonic_answered_with"), status);
+			set_error(tr("subsonic_answered_with"), answered_status);
 		}
 		json_free(doc);
 		free(*body);
@@ -777,7 +981,9 @@ bool subsonic_stream_url(const subsonic_song_t *song, char *url, size_t size) {
 
 	urlbuf_t ub;
 	ub_init(&ub, url, size);
-	ub_add(&ub, "%s/rest/stream.view?id=%s", server, enc);
+	// active_base, not `server`: with two addresses it is the one that
+	// answered last, which is the one that can serve the audio.
+	ub_add(&ub, "%s/rest/stream.view?id=%s", active_base[0] ? active_base : server, enc);
 	if (bitrate > 0) {
 		// `format=mp3` is the one transcode every server implements; the bit
 		// rate caps it, and the server picks the closest it can do.
@@ -802,7 +1008,7 @@ bool subsonic_cover_url(const char *cover_id, int pixels, char *url, size_t size
 
 	urlbuf_t ub;
 	ub_init(&ub, url, size);
-	ub_add(&ub, "%s/rest/getCoverArt.view?id=%s&size=%d", server, enc, pixels);
+	ub_add(&ub, "%s/rest/getCoverArt.view?id=%s&size=%d", active_base[0] ? active_base : server, enc, pixels);
 	ub_auth(&ub);
 	return ub.ok;
 }
@@ -855,6 +1061,63 @@ bool subsonic_star(const char *item_id, bool star) {
 // sign-in
 // ---------------------------------------------------------------------------
 
+// Switches the live session to a saved entry. No password is asked for: the
+// salt and digest stored with it are enough to sign requests, and a ping says
+// whether the server still accepts them (a password changed since would not).
+bool subsonic_saved_activate(int index) {
+	clear_error();
+
+	subsonic_saved_t entry;
+	if (!subsonic_saved_get(index, &entry)) {
+		set_error("%s", tr("subsonic_not_configured"));
+		return false;
+	}
+	if (!entry.signed_in) {
+		// Saved before it was ever signed in to, or with the digest stripped:
+		// there is nothing to sign with, so the password is needed once.
+		set_error("%s", tr("subsonic_sign_in_first"));
+		return false;
+	}
+
+	char saved_server[SUBSONIC_URL_MAX];
+	char saved_alt[SUBSONIC_URL_MAX];
+	char saved_user[SUBSONIC_NAME_MAX];
+	char saved_salt[16];
+	char saved_token[MD5_HEX_LEN];
+	memcpy(saved_server, server, sizeof(saved_server));
+	memcpy(saved_alt, alt_server, sizeof(saved_alt));
+	memcpy(saved_user, user, sizeof(saved_user));
+	memcpy(saved_salt, salt, sizeof(saved_salt));
+	memcpy(saved_token, token, sizeof(saved_token));
+
+	snprintf(server, sizeof(server), "%s", entry.server);
+	snprintf(alt_server, sizeof(alt_server), "%s", entry.alt_server);
+	snprintf(active_base, sizeof(active_base), "%s", entry.server);
+	snprintf(user, sizeof(user), "%s", entry.user);
+	snprintf(salt, sizeof(salt), "%s", entry.salt);
+	snprintf(token, sizeof(token), "%s", entry.token);
+
+	if (!subsonic_ping()) {
+		memcpy(server, saved_server, sizeof(server));
+		memcpy(alt_server, saved_alt, sizeof(alt_server));
+		memcpy(active_base, saved_server, sizeof(active_base));
+		memcpy(user, saved_user, sizeof(user));
+		memcpy(salt, saved_salt, sizeof(salt));
+		memcpy(token, saved_token, sizeof(token));
+		return false;
+	}
+
+	config_set("subsonic", "server", server);
+	config_set("subsonic", "alt_server", alt_server);
+	config_set("subsonic", "user", user);
+	config_set("subsonic", "salt", salt);
+	config_set("subsonic", "token", token);
+	config_save();
+
+	printf("subsonic: switched to %s as %s\n", server, user);
+	return true;
+}
+
 bool subsonic_ping(void) {
 	char *body = NULL;
 	json_doc_t doc;
@@ -865,7 +1128,7 @@ bool subsonic_ping(void) {
 	return ok;
 }
 
-bool subsonic_login(const char *new_server, const char *new_user, const char *password) {
+bool subsonic_login(const char *new_server, const char *new_alt, const char *new_user, const char *password) {
 	clear_error();
 
 	if (!new_server || !*new_server || !new_user || !*new_user || !password || !*password) {
@@ -877,6 +1140,7 @@ bool subsonic_login(const char *new_server, const char *new_user, const char *pa
 	// address or a wrong password must leave a working session exactly as it
 	// was, not replace it with a broken one.
 	char candidate_server[SUBSONIC_URL_MAX];
+	char candidate_alt[SUBSONIC_URL_MAX];
 	char candidate_salt[16];
 	char candidate_token[MD5_HEX_LEN];
 
@@ -885,6 +1149,14 @@ bool subsonic_login(const char *new_server, const char *new_user, const char *pa
 		set_error("%s", tr("subsonic_bad_address"));
 		return false;
 	}
+	normalise_server(new_alt, candidate_alt, sizeof(candidate_alt));
+
+	// The same address twice is not a second address: it would only make every
+	// request retry against a host already known to be unreachable.
+	if (candidate_alt[0] && strcmp(candidate_alt, candidate_server) == 0) {
+		candidate_alt[0] = '\0';
+	}
+
 	make_salt(candidate_salt, sizeof(candidate_salt));
 
 	char signed_text[512];
@@ -892,15 +1164,19 @@ bool subsonic_login(const char *new_server, const char *new_user, const char *pa
 	md5_hex(signed_text, strlen(signed_text), candidate_token);
 
 	char saved_server[SUBSONIC_URL_MAX];
+	char saved_alt[SUBSONIC_URL_MAX];
 	char saved_user[SUBSONIC_NAME_MAX];
 	char saved_salt[16];
 	char saved_token[MD5_HEX_LEN];
 	memcpy(saved_server, server, sizeof(saved_server));
+	memcpy(saved_alt, alt_server, sizeof(saved_alt));
 	memcpy(saved_user, user, sizeof(saved_user));
 	memcpy(saved_salt, salt, sizeof(saved_salt));
 	memcpy(saved_token, token, sizeof(saved_token));
 
 	snprintf(server, sizeof(server), "%s", candidate_server);
+	snprintf(alt_server, sizeof(alt_server), "%s", candidate_alt);
+	snprintf(active_base, sizeof(active_base), "%s", candidate_server);
 	snprintf(user, sizeof(user), "%s", new_user);
 	snprintf(salt, sizeof(salt), "%s", candidate_salt);
 	snprintf(token, sizeof(token), "%s", candidate_token);
@@ -909,6 +1185,8 @@ bool subsonic_login(const char *new_server, const char *new_user, const char *pa
 		// Put back what was there. last_error already says why the ping failed,
 		// and it is the sentence the login page shows.
 		memcpy(server, saved_server, sizeof(server));
+		memcpy(alt_server, saved_alt, sizeof(alt_server));
+		memcpy(active_base, saved_server, sizeof(active_base));
 		memcpy(user, saved_user, sizeof(user));
 		memcpy(salt, saved_salt, sizeof(salt));
 		memcpy(token, saved_token, sizeof(token));
@@ -916,14 +1194,28 @@ bool subsonic_login(const char *new_server, const char *new_user, const char *pa
 	}
 
 	config_set("subsonic", "server", server);
+	config_set("subsonic", "alt_server", alt_server);
 	config_set("subsonic", "user", user);
 	config_set("subsonic", "salt", salt);
 	config_set("subsonic", "token", token);
 	config_save();
 
+	// Remembered for the sign-in page, so the next time this server is one tap
+	// away instead of three fields.
+	subsonic_saved_t entry;
+	memset(&entry, 0, sizeof(entry));
+	snprintf(entry.server, sizeof(entry.server), "%s", server);
+	snprintf(entry.alt_server, sizeof(entry.alt_server), "%s", alt_server);
+	snprintf(entry.user, sizeof(entry.user), "%s", user);
+	snprintf(entry.salt, sizeof(entry.salt), "%s", salt);
+	snprintf(entry.token, sizeof(entry.token), "%s", token);
+	entry.signed_in = true;
+	subsonic_saved_store(&entry);
+
 	// The digest, never the password. This line is the whole point of the
 	// salt: what is on the card is not a credential anyone can log in with
 	// elsewhere.
-	printf("subsonic: signed in to %s as %s\n", server, user);
+	printf("subsonic: signed in to %s as %s%s\n", server, user,
+		   alt_server[0] ? " (second address kept)" : "");
 	return true;
 }

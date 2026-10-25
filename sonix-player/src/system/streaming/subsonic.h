@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "src/system/core/md5.h"
+
 // Subsonic, and everything that speaks its protocol: Navidrome, Airsonic,
 // Gonic, Ampache, LMS, Funkwhale, Supysonic, Astiga...
 //
@@ -118,14 +120,57 @@ const char *subsonic_display_name(void);
 // The server address as typed, without a trailing slash. Empty when unset.
 const char *subsonic_server(void);
 
+// The optional second address for the same server -- the LAN one at home, the
+// other one away from it. Empty when there is none.
+const char *subsonic_alt_server(void);
+
+// Which of the two answered last. What stream and cover URLs are built on, so
+// that a track is fetched from the address that is actually reachable.
+const char *subsonic_active_server(void);
+
 // Blocks. Signs in with `password` against `server`, and only stores anything
 // once the server has answered a ping with it: a wrong address or a wrong
 // password leaves the previous session exactly as it was.
 //
 // `server` may be given with or without a scheme and with or without a trailing
 // slash: "music.example.com", "http://192.168.1.10:4533" and
-// "https://x/navidrome/" all work.
-bool subsonic_login(const char *server, const char *user, const char *password);
+// "https://x/navidrome/" all work. `alt` may be NULL or empty.
+//
+// A successful sign-in also remembers the server in the saved list, so it can
+// be picked from the sign-in page next time instead of retyped.
+bool subsonic_login(const char *server, const char *alt, const char *user, const char *password);
+
+// ---------------------------------------------------------------------------
+// Saved servers
+//
+// One entry per server the player has signed in to. What is stored is the
+// address, the alternative address, the user name, and the salt and digest
+// that stand in for the password -- never the password itself.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+	char server[SUBSONIC_URL_MAX];
+	char alt_server[SUBSONIC_URL_MAX];
+	char user[SUBSONIC_NAME_MAX];
+	char salt[16];
+	char token[MD5_HEX_LEN];
+	bool signed_in;
+} subsonic_saved_t;
+
+// How many are stored. They are listed in the order they were added.
+int subsonic_saved_count(void);
+bool subsonic_saved_get(int index, subsonic_saved_t *out);
+
+// Adds the entry, or updates the one for the same primary address.
+void subsonic_saved_store(const subsonic_saved_t *entry);
+
+// Removes one and closes the gap behind it.
+void subsonic_saved_forget(int index);
+
+// Switches the live session to a saved entry without asking for the password
+// again. False when the entry has no digest to sign with, or the server
+// refuses it -- in which case the caller must ask for the password.
+bool subsonic_saved_activate(int index);
 
 // Forgets the server, the user and the signed salt.
 void subsonic_logout(void);
