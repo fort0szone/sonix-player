@@ -122,6 +122,8 @@ void subsoniccache_set_network_wanted(bool wanted);
 bool subsoniccache_network_wanted(void);
 
 // True if `path` is inside the Subsonic cache.
+int subsoniccache_duration(const char *path);
+
 bool subsoniccache_owns(const char *path);
 
 // The cache directory, or NULL with no card.
@@ -140,6 +142,12 @@ bool subsoniccache_album_id(const char *path, char *out, size_t size);
 // The Subsonic song id from the local path, read back from the sidecar. False
 // when the path is not from this cache.
 bool subsoniccache_song_id(const char *path, char *out, size_t size);
+
+// The bitrate the server reported for this track, in kbps, or 0 when the path
+// is not from this cache or the server did not say. What the details page
+// shows: the file itself cannot answer -- a transcoded stream's own bitrate is
+// not in it -- and the cache file may still be arriving.
+int subsoniccache_bitrate(const char *path);
 
 // Why the last subsoniccache_start() failed, as a sentence fit to display.
 // Empty on success. Per thread, like http_last_error().

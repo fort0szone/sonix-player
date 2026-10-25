@@ -148,7 +148,15 @@ const char *subsoniccache_dir(void) { return cache_dir[0] ? cache_dir : NULL; }
 // extension -- nothing opens a FLAC named .bin -- so this has to be right
 // before the file exists, which is why it comes from the server's own `suffix`
 // and not from a guess about the MIME type.
+//
+// With transcoding on it is MP3 whatever the server holds: `suffix` describes
+// the file on the server, and what arrives is what the transcoder produced.
+// Reading `suffix` in that case wrote an MP3 to "<digest>.flac", and the FLAC
+// decoder was handed it -- every quality but Original failed to play.
 static const char *extension_for(const subsonic_song_t *song) {
+	if (subsonic_get_bitrate() > 0) {
+		return "mp3";
+	}
 	if (!song) {
 		return "flac";
 	}
@@ -601,6 +609,28 @@ bool subsoniccache_song_id(const char *path, char *out, size_t size) {
 	return read_tag(path, "song_id", out, size);
 }
 
+int subsoniccache_bitrate(const char *path) {
+	if (!subsoniccache_owns(path)) {
+		return 0;
+	}
+	char value[16];
+	if (!read_tag(path, "bitrate", value, sizeof(value))) {
+		return 0;
+	}
+	return atoi(value);
+}
+
+int subsoniccache_duration(const char *path) {
+	if (!subsoniccache_owns(path)) {
+		return 0;
+	}
+	char value[16];
+	if (!read_tag(path, "duration", value, sizeof(value))) {
+		return 0;
+	}
+	return atoi(value);
+}
+
 bool subsoniccache_owns(const char *path) {
 	return path && cache_dir[0] && strncmp(path, cache_dir, strlen(cache_dir)) == 0;
 }
@@ -643,6 +673,18 @@ void subsoniccache_write_sidecars(const subsonic_song_t *song, const char *cover
 		// scrobbling and starring need.
 		fprintf(f, "song_id=%s\n", song->id);
 		fprintf(f, "track=%d\n", song->track);
+		// What the server says the track is. Not something the file can be
+		// asked for: it describes the copy on the server, and for a transcoded
+		// stream it describes the stream. The details page shows it.
+		fprintf(f, "bitrate=%d\n", song->bit_rate);
+		// The length as the server knows it. A transcoded stream is a CBR MP3
+		// whose Xing header states no frame count, so dr_mp3 can only estimate
+		// its length from the bytes that have arrived -- and while the file is
+		// still growing that estimate is short, which left the player's bar
+		// sitting at its end with the position stuck. The server's figure is
+		// the truth and costs one line here.
+		fprintf(f, "duration=%d\n", song->duration);
+		fprintf(f, "suffix=%s\n", song->suffix);
 		fclose(f);
 		if (rename(tags_tmp, tags) != 0) {
 			remove(tags_tmp);

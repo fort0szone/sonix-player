@@ -3878,6 +3878,44 @@ static void fav_btn_event_cb(lv_event_t *e) {
 }
 
 // The format line, the way the stock player writes it: "16/44.1 FLAC".
+// "2900kbps" under a thousand, "2.8Mbps" above it. Four digits is where a
+// number stops being read at a glance, and "2900kbps" is read as a different
+// quantity from "2.8Mbps" by most people even though it is the same one.
+static void bitrate_text(int kbps, char *out, size_t size) {
+	if (kbps <= 0) {
+		out[0] = '\0';
+		return;
+	}
+	if (kbps < 1000) {
+		snprintf(out, size, "%dkbps", kbps);
+	} else {
+		// One decimal below 10 Mbps, none above: "9.9Mbps" and "10Mbps" are
+		// both as precise as the number deserves.
+		double mbps = (double)kbps / 1000.0;
+		if (mbps < 9.95) {
+			snprintf(out, size, "%.1fMbps", mbps);
+		} else {
+			snprintf(out, size, "%.0fMbps", mbps);
+		}
+	}
+}
+
+// The bitrate of whatever is playing, from whichever source knows it. The
+// decoder's nominal figure is the one written in the file and the only one
+// worth showing on a Qobuz or Tidal track, whose cache file is still growing
+// while it plays. A Subsonic track that was transcoded has no such figure in
+// the stream, so the server's own is used -- it is in the sidecar.
+static int playing_bitrate_kbps(const device_state_t *state) {
+	int kbps = audio_get_stream_bitrate_kbps();
+	if (kbps > 0) {
+		return kbps;
+	}
+	if (state->current_file[0] && subsoniccache_owns(state->current_file)) {
+		return subsoniccache_bitrate(state->current_file);
+	}
+	return 0;
+}
+
 static void update_format_label(const device_state_t *state) {
 	// The mark beside it in Studio, which is the same question asked of the
 	// stream rather than of the library. Here because this is where the format
@@ -3965,7 +4003,7 @@ static void update_format_label(const device_state_t *state) {
 		// only one showable on a Qobuz or Tidal track: the cache file is still
 		// growing while it plays, so the bytes-over-seconds average climbed on
 		// screen until the download finished and it settled.
-		int kbps = audio_get_stream_bitrate_kbps();
+		int kbps = playing_bitrate_kbps(state);
 
 		// When the file does not declare one (a variable-bitrate MP3, a silent
 		// AAC) the real average stands in -- but only once the download has
@@ -3978,7 +4016,9 @@ static void update_format_label(const device_state_t *state) {
 		}
 
 		if (kbps > 0) {
-			lv_label_set_text_fmt(format_label, "%d kbps %s", kbps, name);
+			char rate[16];
+			bitrate_text(kbps, rate, sizeof(rate));
+			lv_label_set_text_fmt(format_label, "%s %s", rate, name);
 			return;
 		}
 		// Neither one: the format name alone beats quoting a bit depth the
@@ -3987,8 +4027,21 @@ static void update_format_label(const device_state_t *state) {
 		return;
 	}
 
+	// Lossless: depth and rate, then the bitrate where one is known. The
+	// bitrate of a lossless file is a derived figure rather than a setting --
+	// it is what the music happened to need -- but it is the one number that
+	// tells a 24/96 master from a 16/44.1 one at a glance, and on a streaming
+	// track it is what says how much is coming down the wire.
 	int bits = audio_get_stream_bits();
-	lv_label_set_text_fmt(format_label, "%d/%g %s", bits > 0 ? bits : 16, state->stream_sample_rate / 1000.0, name);
+	char rate[16];
+	bitrate_text(playing_bitrate_kbps(state), rate, sizeof(rate));
+	if (rate[0]) {
+		lv_label_set_text_fmt(format_label, "%d/%g %s %s", bits > 0 ? bits : 16,
+							  state->stream_sample_rate / 1000.0, rate, name);
+	} else {
+		lv_label_set_text_fmt(format_label, "%d/%g %s", bits > 0 ? bits : 16, state->stream_sample_rate / 1000.0,
+							  name);
+	}
 }
 
 // The speed setting of what is playing: an episode has its own, apart from the

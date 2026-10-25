@@ -143,6 +143,12 @@ void audio_get_current_file(char *out, size_t out_size);
 
 void audio_get_progress(double *current_secs, double *total_secs);
 
+// The length of `filepath`, when the caller knows it better than the file does
+// -- a streaming track whose container does not state its duration while it is
+// still downloading. It applies to that file only, so the call may be made
+// before or after audio_play(); NULL or a non-positive length forgets it.
+void audio_set_known_duration(const char *filepath, double secs);
+
 // Get the sample rate and channel count of the currently playing stream.
 // Both are 0 if nothing has started playing yet.
 void audio_get_stream_info(int *sample_rate, int *channels);

@@ -585,6 +585,41 @@ static int decoder_fill(void *user, short *dst, int frames) {
 }
 static double progress_total_secs = 0.0;
 
+// The length the caller knew before the file was opened, when that is better
+// than what the file itself says. A growing MP3 -- a transcoded stream -- has
+// no frame count in its header, so dr_mp3 can only estimate from the bytes that
+// have arrived, and that estimate is short for as long as the file is still
+// arriving: the bar reads full and the position stops. The server knows the
+// real length, so it is handed in here and used whenever the decoder's own
+// answer is 0 or missing.
+//
+// It is bound to the file it describes, not just stored. The caller cannot set
+// it at exactly the right moment: the playback thread opens the file whenever
+// it gets to it, which may be before or after the call, so a bare number could
+// either be cleared by the load it was meant for or survive into the next
+// track. A path beside it settles both questions -- it applies to that file and
+// to no other.
+static char known_total_file[512];
+static double known_total_secs = 0.0;
+
+void audio_set_known_duration(const char *filepath, double secs) {
+	if (!filepath || !filepath[0] || secs <= 0.0) {
+		known_total_file[0] = '\0';
+		known_total_secs = 0.0;
+		return;
+	}
+	snprintf(known_total_file, sizeof(known_total_file), "%s", filepath);
+	known_total_secs = secs;
+}
+
+// The remembered length for this file, or 0.
+static double known_duration_for(const char *filepath) {
+	if (!filepath || !known_total_file[0] || strcmp(known_total_file, filepath) != 0) {
+		return 0.0;
+	}
+	return known_total_secs;
+}
+
 static int stream_sample_rate = 0;
 static int stream_channels = 0;
 static int stream_bits = 0; // source bit depth (16/24/32), for the format line
@@ -3149,6 +3184,36 @@ static int bluetooth_decimation(int sample_rate, int channels, int out_bits, boo
 	return sink_rate ? decimate_factor_for(sample_rate, (int)sink_rate) : 1;
 }
 
+// The bitrate of a lossless file: its bytes over its length. The container's
+// header usually does not state one, because there is nothing to state -- the
+// figure falls out of the music -- so it is worked out here, once per track.
+//
+// Only for files that are complete. A streaming track is still growing when it
+// starts, so its size over its length would climb on screen until the download
+// finished; those carry the server's own figure in the sidecar instead.
+static int lossless_bitrate_kbps(const decoder_t *dec, const char *path) {
+	if (!dec || !path || !path[0]) {
+		return 0;
+	}
+	int rate = decoder_sample_rate(dec);
+	uint64_t frames = decoder_total_pcm_frames(dec);
+	if (rate <= 0 || frames == 0) {
+		return 0;
+	}
+	double seconds = (double)frames / (double)rate;
+	if (seconds <= 0.5) {
+		return 0;
+	}
+	if (growfile_is_growing(path)) {
+		return 0;
+	}
+	struct stat st;
+	if (stat(path, &st) != 0 || st.st_size <= 0) {
+		return 0;
+	}
+	return (int)((double)st.st_size * 8.0 / seconds / 1000.0 + 0.5);
+}
+
 static void play_decoded_file(const char *filepath, decode_format_t format) {
 	decoder_t *dec = decoder_open(filepath, format);
 	if (!dec) {
@@ -3236,7 +3301,9 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 	}
 
 	pthread_mutex_lock(&audio_mutex);
-	progress_total_secs = (double)total_frames / sample_rate;
+	// The decoder's own figure unless it has none: see known_total_secs.
+	progress_total_secs = total_frames > 0 ? (double)total_frames / sample_rate
+										  : known_duration_for(filepath);
 	progress_current_secs = opening_position();
 	progress_floor_secs = -1.0;
 	stream_sample_rate = sample_rate;
@@ -3245,6 +3312,17 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 	stream_dsd_multiple = dsd_multiple;
 	stream_bitrate_kbps = decoder_bitrate_kbps(dec);
 	stream_lossy = decoder_is_lossy(dec);
+
+	// A lossless file declares no bitrate -- it has no reason to, since the
+	// figure is a consequence of the music rather than a setting -- so FLAC,
+	// ALAC, WavPack and the rest arrived at the player with nothing to print
+	// while a Qobuz FLAC and a Subsonic FLAC both showed one. The number a
+	// listener means by "the bitrate of this track" is its size over its
+	// length, which is exactly what the tags sidecar holds for the streaming
+	// services and what the file itself says for anything on the card.
+	if (stream_bitrate_kbps <= 0 && !stream_lossy) {
+		stream_bitrate_kbps = lossless_bitrate_kbps(dec, filepath);
+	}
 	snprintf(stream_codec, sizeof(stream_codec), "%s", decoder_codec_name(dec));
 	// A lossy format that does not declare its bitrate: the player can only
 	// print the format name. Worth logging, because on a streaming track there

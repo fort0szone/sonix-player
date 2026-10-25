@@ -1503,7 +1503,19 @@ static void details_fill(const char *file, const song_metadata_t *tags, int bits
 	// duration, which is how dense the file is. Lossy files already carry it in
 	// the row above, and for a streamed track the cache file may be half
 	// downloaded, making the number meaningless.
-	if (!lossy && !qobuzcache_owns(file) && !tidalcache_owns(file) && !subsoniccache_owns(file) && duration_secs > 0.5) {
+	//
+	// A Subsonic track is the exception that has a real number to show: the
+	// server reported one when the album was listed, and it is kept in the
+	// sidecar. It is shown for lossless too -- a FLAC from a music server has a
+	// bitrate worth knowing, and it is the only place that says how heavy the
+	// stream is.
+	if (subsoniccache_owns(file)) {
+		int server_kbps = subsoniccache_bitrate(file);
+		if (server_kbps > 0) {
+			snprintf(buffer, sizeof(buffer), "%d kbps", server_kbps);
+			details_add_row("trackmenu_bitrate", buffer);
+		}
+	} else if (!lossy && !qobuzcache_owns(file) && !tidalcache_owns(file) && duration_secs > 0.5) {
 		struct stat st_kbps;
 		if (stat(file, &st_kbps) == 0 && st_kbps.st_size > 0) {
 			int avg = (int)((double)st_kbps.st_size * 8.0 / duration_secs / 1000.0 + 0.5);
