@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <pthread.h>
@@ -21,6 +22,23 @@
 
 #define FETCH_TIMEOUT_SECS 20
 #define FETCH_CHUNK 32768
+
+// How long the caller of subsoniccache_start() may be kept waiting for the
+// prebuffer before playback starts anyway.
+//
+// subsoniccache_start() runs on the GUI thread when a track is tapped, and the
+// prebuffer it builds is measured in bytes, not time: 512 KB, or more when the
+// network turns out to be slower than the track consumes. On a 1 Mbit/s link
+// that is tens of seconds of a frozen interface -- the reported symptom -- and
+// the very thing the reserve was for is already handled downstream: the decoder
+// reads a file that is still growing (growfile) and audio.c refills it. So the
+// wait is capped, and a slow network trades a possible small stall later for an
+// interface that answers now.
+//
+// Only once the first bytes have arrived: a path to a zero-length file is not a
+// track, so the connection itself is still allowed to take as long as its own
+// timeout allows.
+#define STREAM_START_BUDGET_MS 1200
 
 static char cache_dir[512];
 
@@ -879,13 +897,26 @@ static void download_end(download_t *d, bool ok) {
 
 // Writes until `until` bytes are on disk (or, with until == 0, to the end of
 // the stream). Returns false when it went wrong.
-static bool download_pump(download_t *d, long until, bool *finished) {
+static long monotonic_ms(void) {
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long)t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+// `deadline_ms` is an absolute monotonic_ms() value, or 0 for no limit. On
+// expiry the pump stops without failing: *finished stays false, which is the
+// same thing it says for a file that has not all arrived yet, so the caller
+// starts on what is there and the rest follows on the download thread.
+static bool download_pump(download_t *d, long until, bool *finished, long deadline_ms) {
 	char buf[FETCH_CHUNK];
 	*finished = false;
 
 	while (d->done < until || until == 0) {
 		if (current_generation() != d->generation) {
 			return false; // something else is playing now
+		}
+		if (deadline_ms && d->done > 0 && monotonic_ms() >= deadline_ms) {
+			return true; // out of patience, not out of luck: play what is here
 		}
 
 		int n = http_stream_read(&d->stream, buf, (int)sizeof(buf));
@@ -922,7 +953,7 @@ static void *download_thread(void *arg) {
 
 	download_t *d = arg;
 	bool finished = false;
-	bool ok = download_pump(d, 0, &finished);
+	bool ok = download_pump(d, 0, &finished, 0);
 	download_end(d, ok && finished);
 	return NULL;
 }
@@ -1058,8 +1089,12 @@ bool subsoniccache_start(const subsonic_song_t *song, char *out, size_t size) {
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 
+	// One deadline for the whole prebuffer, probe and top-up together: the wait
+	// the caller sees is STREAM_START_BUDGET_MS, not a budget per phase.
+	long deadline = monotonic_ms() + STREAM_START_BUDGET_MS;
+
 	bool finished = false;
-	if (!download_pump(d, probe, &finished)) {
+	if (!download_pump(d, probe, &finished, deadline)) {
 		set_error(current_generation() != d->generation ? tr("download_cancelled") : tr("download_interrupted"));
 		download_end(d, false);
 		return false;
@@ -1116,7 +1151,7 @@ bool subsoniccache_start(const subsonic_song_t *song, char *out, size_t size) {
 		}
 	}
 
-	if (!finished && d->done < want && !download_pump(d, want, &finished)) {
+	if (!finished && d->done < want && !download_pump(d, want, &finished, deadline)) {
 		set_error(current_generation() != d->generation ? tr("download_cancelled") : tr("download_interrupted"));
 		download_end(d, false);
 		return false;
