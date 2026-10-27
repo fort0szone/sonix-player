@@ -1711,7 +1711,7 @@ static void build_search_page(gui_config_t *cfg) {
 	// Room for it, so a long query does not run underneath.
 	lv_obj_set_style_pad_right(search_field, 60, 0);
 
-	static const char *const KINDS[] = {"tracks_2", "albums", "artists"};
+	static const char *const KINDS[] = {"search_tracks_2", "albums", "artists"};
 	for (int i = 0; i < 3; i++) {
 		lv_obj_t *pill = lv_btn_create(search_screen);
 		lv_obj_set_size(pill, 140, 52);
