@@ -1234,6 +1234,25 @@ static bool playing_local_file(const device_state_t *state) {
 		   !dlna_owns_playback();
 }
 
+// Whether the track playing can have words on screen. That is everything
+// playing_local_file() allows, plus a Subsonic track: it is a real file on the
+// card -- the cache writes it whole as it arrives -- so an .lrc beside it is
+// found and read like any other, and its tags are there for reading. Qobuz,
+// Tidal, podcasts and a station are still left out: their files are either
+// still growing or not a track at all.
+//
+// Separate from playing_local_file() because that one also decides the
+// waveform, and a cached streaming track is deliberately not offered one.
+static bool lyrics_eligible(const device_state_t *state) {
+	if (state->live || audiobook_is_playing()) {
+		return false;
+	}
+	if (subsoniccache_owns(state->current_file)) {
+		return true;
+	}
+	return playing_local_file(state);
+}
+
 // Puts the progress slider over the waveform, or back where it belongs.
 //
 // The slider is the only thing on the page that knows how to turn a finger into
@@ -1514,11 +1533,11 @@ static void *lyrics_worker(void *arg) {
 	return NULL;
 }
 
-// Only a file on the card has words to show.
+// Only a track that is a whole file on the card has words to show.
 static bool lyrics_available(void) {
 	device_state_t state;
 	device_state_get(&state);
-	return playing_local_file(&state);
+	return lyrics_eligible(&state);
 }
 
 // The page is up, or on its way in or out under a finger.
@@ -1539,7 +1558,7 @@ static bool lyrics_has_words(void) { return lyrics_loaded && lyrics_cur.count > 
 // starts: the tags of a FLAC are read whole, pictures included, and that is
 // not the interface's to wait for. Asked again only when the file changes.
 static void lyrics_request(const device_state_t *state) {
-	if (!state->current_file[0] || !playing_local_file(state)) {
+	if (!state->current_file[0] || !lyrics_eligible(state)) {
 		return;
 	}
 	if (strcmp(state->current_file, lyrics_path) == 0) {
@@ -1969,7 +1988,7 @@ static void lyrics_commit(bool on) {
 	lyrics_wanted = on;
 	device_state_t state;
 	device_state_get(&state);
-	lyrics_allowed = on && playing_local_file(&state);
+	lyrics_allowed = on && lyrics_eligible(&state);
 	lyrics_now = lyrics_allowed && lyrics_has_words();
 	if (lyrics_now) {
 		lyrics_slide_to(LYRICS_FULL);
@@ -2132,7 +2151,7 @@ static void lyrics_enable_wifi_cb(void *user) {
 	(void)user;
 	device_state_t state;
 	device_state_get(&state);
-	if (!state.current_file[0] || !playing_local_file(&state)) {
+	if (!state.current_file[0] || !lyrics_eligible(&state)) {
 		return;
 	}
 	snprintf(lyrics_wifi_path, sizeof(lyrics_wifi_path), "%s", state.current_file);
@@ -2180,7 +2199,7 @@ static void lyrics_search_run(void) {
 	}
 	device_state_t state;
 	device_state_get(&state);
-	if (!state.current_file[0] || !playing_local_file(&state)) {
+	if (!state.current_file[0] || !lyrics_eligible(&state)) {
 		return;
 	}
 
@@ -3024,7 +3043,9 @@ static void update_layout(const device_state_t *state) {
 	// Studio only wants a picture and a name, and takes whatever is playing:
 	// a file, a cached Qobuz or Tidal track, a podcast, a book, a station.
 	bool local = playing_local_file(state);
-	bool lyrics = lyrics_wanted && local;
+	// The words may be wanted on a Subsonic track, which is not "local" as the
+	// waveform means it. See lyrics_eligible().
+	bool lyrics = lyrics_wanted && lyrics_eligible(state);
 	bool studio = layout_choice == PLAYER_LAYOUT_STUDIO;
 	bool wave = layout_choice == PLAYER_LAYOUT_ALTERNATIVE && local;
 	bool alt = wave;
