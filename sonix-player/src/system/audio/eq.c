@@ -1879,6 +1879,20 @@ static void slots_run_pass(float *buf, int n, int channels, int from, int to) {
 }
 
 static void gain_run_pass(float *buf, int n, int channels, const float *gain) {
+	// Stereo is the only case the hardware here produces, and it is worth its
+	// own walk: the general loop multiplies by the channel count for every
+	// sample and re-tests the channel bound on each one, where this walks two
+	// pointers and does two multiplies. Same arithmetic, same order.
+	if (channels == 2) {
+		float *p = buf;
+		for (int i = 0; i < n; i++) {
+			const float g = gain[i];
+			p[0] = p[0] * g;
+			p[1] = p[1] * g;
+			p += 2;
+		}
+		return;
+	}
 	for (int i = 0; i < n; i++) {
 		for (int c = 0; c < channels; c++) {
 			buf[i * channels + c] = buf[i * channels + c] * gain[i];
