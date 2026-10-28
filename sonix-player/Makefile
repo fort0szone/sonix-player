@@ -155,7 +155,17 @@ HOST_LDFLAGS = $(shell sdl2-config --libs) -lpthread -lm -ldl -lasound $(shell p
 #
 # --gc-sections: the other half of -ffunction-sections (see TARGET_CFLAGS).
 TARGET_LDFLAGS = $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) -lpthread -lm -ldl -lasound \
-				 $(GB_LDFLAGS) -Wl,--gc-sections
+				 $(GB_LDFLAGS) -Wl,--gc-sections -Wl,-O1
+
+# -O1: lets the linker optimise its own symbol tables (hash ordering, string
+# merging) rather than just emitting them. No effect on the code itself, and no
+# change to the ELF the loader is handed.
+#
+# --hash-style=gnu was tried here and taken back out. On MIPS it does not emit
+# the GNU hash table at all: it emits DT_MIPS_XHASH, which glibc only learned to
+# read in 2.25 and this device runs 2.22. The saving was a few kilobytes and a
+# few microseconds at startup; the risk was a binary the device's own ld.so
+# cannot resolve symbols for, which is a bootloop. Not worth it.
 
 # FreeType for the target, built static: the rootfs has no libfreetype.so. The
 # host uses the system one. The device's fonts are plain OTF/TTF, so zlib,
