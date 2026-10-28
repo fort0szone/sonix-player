@@ -2,6 +2,11 @@
 
 sonix-player/sonix_player
 sonix-player/sonix_player_debug
+sonix-player/tmp/
+sonix-packer/sonix_player
+sonix-packer/sonix_player_debug
+sonix-packer/sonix_launch
+sonix-packer/r1.upt
 sonix-player/sonix_player_host
 sonix-player/sonix_launch
 
